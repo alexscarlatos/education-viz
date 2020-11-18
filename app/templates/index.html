@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script type="text/javascript" src="https://d3js.org/d3.v4.js"></script>
+        <script src="//cdnjs.cloudflare.com/ajax/libs/topojson/1.6.9/topojson.min.js"></script>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.1/jquery.min.js"></script>
+        <style>
+            #viz-container {
+                padding: 10px;
+            }
+            .tab {
+                display: inline-block;
+                border: 1px solid black;
+                padding: 5px;
+            }
+            .tab a {
+                text-decoration: none;
+            }
+
+            input {
+                max-width: 10ch;
+            }
+            .input-row {
+                margin-top: 5px;
+            }
+
+            #viewbox {
+                border: 1px solid black;
+                margin: 15px;
+                padding: 5px;
+            }
+
+            td {
+                border: 1px solid black;
+                padding: 3px;
+                max-width: 200px;
+            }
+            .significant {
+                border: 2px solid red;
+            }
+            .reliable {
+                background-color: green;
+            }
+            .okay {
+                background-color: yellow;
+            }
+            .unreliable {
+                background-color: red;
+            }
+        </style>
+        <script type="text/javascript">
+
+            var COUNTRY = "Country";
+            var REGION = "Region";
+            var INCOME_GROUP = "Income Group";
+            var YEAR = "Year";
+            
+            var ALL = "all";
+
+            var countriesToExclude = ["Arab World",
+                "Caribbean small states",
+                "Central Europe and the Baltics",
+                "Early-demographic dividend",
+                "East Asia & Pacific",
+                "East Asia & Pacific (IDA & IBRD countries)",
+                "East Asia & Pacific (excluding high income)",
+                "Euro area",
+                "Europe & Central Asia",
+                "Europe & Central Asia (IDA & IBRD countries)",
+                "Europe & Central Asia (excluding high income)",
+                "European Union",
+                "Fragile and conflict affected situations",
+                "Heavily indebted poor countries (HIPC)",
+                "High income",
+                "IBRD only",
+                "IDA & IBRD total",
+                "IDA blend",
+                "IDA only",
+                "IDA total",
+                "Late-demographic dividend",
+                "Latin America & Caribbean",
+                "Latin America & Caribbean (excluding high income)",
+                "Latin America & the Caribbean (IDA & IBRD countries)",
+                "Least developed countries: UN classification",
+                "Low & middle income",
+                "Low income",
+                "Lower middle income",
+                "Middle East & North Africa",
+                "Middle East & North Africa (IDA & IBRD countries)",
+                "Middle East & North Africa (excluding high income)",
+                "Middle income",
+                "North America",
+                "Not classified",
+                "OECD members",
+                "Other small states",
+                "Pacific island small states",
+                "Post-demographic dividend",
+                "Pre-demographic dividend",
+                "Small states",
+                "South Asia",
+                "South Asia (IDA & IBRD)",
+                "Sub-Saharan Africa",
+                "Sub-Saharan Africa (IDA & IBRD countries)",
+                "Sub-Saharan Africa (excluding high income)",
+                "Upper middle income",
+                "World"];
+            var educationVariables = ["Literacy rate, adult total (% of people ages 15 and above)",
+                "Literacy rate, youth total (% of people ages 15-24)",
+                "Primary completion rate, total (% of relevant age group)",
+                "Trained teachers in primary education (% of total teachers)",
+                "School enrollment, primary and secondary (gross), gender parity index (GPI)",
+                "Children out of school (% of primary school age)",
+                "Government expenditure on education, total (% of government expenditure)"];
+
+            // styling variables
+            var width = 1200, height = 300;
+            var dataGraphSize = 300;
+            var paddingWide = 100, paddingHigh = 80;
+            var colors = ["#ff0000", "#00bb00", "#0000ff", "#f49542", "#f4f141", "#41e8f4", "#ca41f4", "#42f498", "#f082ff", "#ff82bc"];
+            var dpRad = 2;
+
+            // reference to svg on canvas
+            var svg;
+
+            // data variables
+            var useStratifiedData = true;
+            var sampledData;
+            var dataPointsForPCA;
+            var dataPointsForMDS;
+            var pcaData;
+
+            // Class for all d3 graph objects
+            class D3Graph {
+                constructor(parentSelector, x, y) {
+                    this.ref = svg.select(parentSelector).append("g").attr("transform", "translate(" + x + "," + y + ")");
+                }
+
+                setLoading() {
+                    this.ref.selectAll("*").remove();
+                    this.ref.append("text").text("Loading...");
+                }
+
+                getGraph() {
+                    this.ref.selectAll("*").remove();
+                    return this.ref;
+                }
+            }
+
+            class HTMLTable {
+                constructor(id, parentClasses, parentID) {
+                    this.id = id;
+                    this.ref = $(parentID);
+                    var classString = parentClasses + " " + id + " viz";
+                    this.ref.append("<table class='" + classString + "' style='display:none;'></table>");
+                    this.ref.append("<p class='" + classString + "' style='display:none;'></p>");
+                }
+
+                get loading() {
+                    return this.ref.find("p." + this.id);
+                }
+
+                get table() {
+                    return this.ref.find("table." + this.id);
+                }
+
+                setLoading() {
+                    this.loading.show();
+                    this.table.hide();
+                }
+
+                getTable() {
+                    this.loading.hide();
+                    this.table.show();
+                    return this.table;
+                }
+            }
+
+            // References to all graphs
+            var worldMap;
+            var biplot;
+            var mdsAttributes;
+            var correlationsTable;
+            var correlationsPartialTable;
+            var stratSampleGraph;
+
+            function regionFilter() { return $("#regionFilter").val(); }
+            function clusterFilter() { return $("#clusterFilter").val(); }
+            function incomeGroupFilter() { return $("#incomeGroupFilter").val(); }
+
+            // return a copy of data, filtered on country and year
+            // also remove values at 0
+            function filterData(data) {
+                var lowYear = $("#minYearSelect").val();
+                var highYear = $("#maxYearSelect").val();
+
+                var incomeGroup = incomeGroupFilter();
+                var region = regionFilter();
+                var cluster = clusterFilter();
+                var allIncomes = incomeGroup == ALL;
+                var allRegions = region == ALL;
+                var allClusters = cluster == ALL;
+                
+                return data.filter(function(d) {
+                    return d[YEAR] >= lowYear && d[YEAR] <= highYear
+                        && (d[INCOME_GROUP] == incomeGroup || allIncomes)
+                        && (d[REGION] == region || allRegions)
+                        && (d.kcluster == cluster || allClusters)
+                        && !contains(countriesToExclude, d[COUNTRY]);
+                });
+            }
+
+            // draw a generic point graph, given the group to draw on, the data source, attributes to visualize and special settings
+            function drawDataGraph(group, initData, attrs, settings) {
+                var data;
+                // filter data
+                if (settings.sampleGraph) {
+                    // Datapoints at 0 were missing in original data
+                    data = initData.filter(function(d) {
+                        var d0 = d[attrs[0]], d1 = d[attrs[1]];
+                        return (isNaN(d0) || d0 > 0) && (isNaN(d1) || d1 > 0);
+                    });
+                } else {
+                    data = initData;
+                }
+
+                // data axes
+                var xAxis = isNaN(data[0][attrs[0]])
+                    ? d3.scaleBand().domain(data.map(function(d) { return d[attrs[0]]; }))
+                    : d3.scaleLinear().domain(d3.extent(data, function(d) { return d[attrs[0]]; }));
+                var yAxis = isNaN(data[0][attrs[1]])
+                    ? d3.scaleBand().domain(data.map(function(d) { return d[attrs[1]]; }))
+                    : d3.scaleLinear().domain(d3.extent(data, function(d) { return d[attrs[1]]; }));
+                xAxis.range([0, dataGraphSize]);
+                yAxis.range([dataGraphSize, 0]);
+
+                // draw axes
+                group.append("g")
+                    .attr("transform", "translate(0," + dataGraphSize + ")")
+                    .call(d3.axisBottom(xAxis))
+                    .selectAll("text")
+                    .attr("transform", "translate(5,5) rotate(30)");
+                group.append("g")
+                    .call(d3.axisLeft(yAxis));
+
+                // draw axis labels
+                var xAxisLabel = settings.xAxisLabel || attrs[0],
+                    yAxisLabel = settings.yAxisLabel || attrs[1];
+                group.append("text")
+                    .attr("class", "xLabel")
+                    .text(xAxisLabel)
+                    .attr("text-anchor", "middle")
+                    .attr("x", dataGraphSize / 2)
+                    .attr("y", dataGraphSize + 40)
+                    .attr("style", "font-size: 14;");
+                group.append("text")
+                    .attr("class", "yLabel")
+                    .text(yAxisLabel)
+                    .attr("text-anchor", "middle")
+                    .attr("transform", "translate(-50," + (dataGraphSize / 2) + ") rotate(-90)")
+                    .attr("style", "font-size: 14;");
+
+                // draw graph title
+                if (settings.title) {
+                    group.append("text")
+                        .text(settings.title)
+                        .attr("transform", "translate(" + (dataGraphSize / 2) + ",-10)")
+                        .style("font-size", 20)
+                        .attr("text-anchor", "middle");
+                }
+
+                // draw data points
+                var datagroup = group.selectAll(".dataPoint")
+                    .data(data)
+                    .enter()
+                    .append("g")
+                    .attr("transform", function(d) { return "translate(" + xAxis(d[attrs[0]]) + "," + yAxis(d[attrs[1]]) + ")"; });
+                var datapoints = datagroup
+                    .append("rect")
+                    .attr("class", "dataPoint")
+                    .attr("id", function(d, i) { return i; })
+                    .attr("msgText", function(d) {
+                        return d[COUNTRY] + ", " + d[YEAR];
+                    })
+                    .attr("width", dpRad * 2)
+                    .attr("height", dpRad * 2)
+                    .attr("transform", "translate(" + (-dpRad) + "," + (-dpRad) + ")");
+                // color data points according to their cluster
+                if (settings.kmeans) {
+                    datapoints.style("fill", function(d) { return colors[d.kcluster] });
+                }
+                // lower opacity on removed data points
+                if (settings.sampleGraph) {
+                    datapoints.attr("opacity", function(d) {return d.kept ? 1 : .1; });
+                }
+                // handle mouseover
+                if (settings.sampleGraph || settings.pcaDataGraph) {
+                    datapoints
+                        .on("mouseover", function() {
+                            d3.select(this).attr("width", dpRad * 3).attr("height", dpRad * 3);
+                            setMessage(d3.select(this).attr("msgText"));
+                        })
+                        .on("mouseleave", function() {
+                            d3.select(this).attr("width", dpRad * 2).attr("height", dpRad * 2);
+                            setMessage("");
+                        });
+                }
+                
+                // label attributes for mds attribute graph
+                if (settings.mdsatts) {
+                    datagroup
+                        .append("text")
+                        .attr("class", "attLabel")
+                        .attr("id", function(d, i) { return i; })
+                        .text(function(d, i) { return sampledData.attributes[i]; } )
+                        .style("opacity", .2)
+                        .on("mouseover", function(d) {
+                            d3.select(this).style("fill", "blue").style("opacity", 1);
+                        })
+                        .on("mouseleave", function(d) {
+                            d3.select(this).style("fill", "black").style("opacity", .2);
+                        });
+                }
+
+                // draw mean
+                if (settings.pcaDataGraph) {
+                    var mean = group
+                        .append("rect")
+                        .attr("class", "mean")
+                        .attr("width", dpRad * 2)
+                        .attr("height", dpRad * 2)
+                        .style("fill", "red");
+                    mean.attr("x", xAxis(0) - dpRad)
+                        .attr("y", yAxis(0) - dpRad);
+                    
+                    group.selectAll(".attVector")
+                        .data(sampledData.attributes)
+                        .enter()
+                        .append("line")
+                        .attr("attName", function(d) { return d; })
+                        .attr("x1", xAxis(0))
+                        .attr("y1", yAxis(0))
+                        .attr("x2", function(d) {
+                            return pcaData.eigenvectors[0][d] * 70 + xAxis(0);
+                        })
+                        .attr("y2", function(d) {
+                            return pcaData.eigenvectors[1][d] * 70 + yAxis(0);
+                        })
+                        .style("stroke", "blue")
+                        .style("stroke-width", 2)
+                        .on("mouseover", function(d) {
+                            setMessage(d3.select(this).attr("attName"));
+                        })
+                        .on("mouseleave", function(d) {
+                            setMessage("");
+                        });;
+
+                    // draw eigenvectors
+                    if (!settings.projected) {
+                        group.selectAll(".eigenvector")
+                            .data([pcaData.eigenvectors[0], pcaData.eigenvectors[1]])
+                            .enter()
+                            .append("line")
+                            .attr("x1", xAxis(pcaData.means[attrs[0]]))
+                            .attr("y1", yAxis(pcaData.means[attrs[1]]))
+                            .attr("x2", function(d) { return xAxis(pcaData.means[attrs[0]]) + d[attrs[0]] * 50; })
+                            .attr("y2", function(d) { return yAxis(pcaData.means[attrs[1]]) + d[attrs[1]] * 50; })
+                            .style("stroke", "blue")
+                            .style("stroke-width", 2);
+                    }
+                }
+            }
+
+            // set up data graphs for PCA viz
+            function generatePCADataGraphs() {
+                drawDataGraph(biplot.getGraph(), pcaData.scored_data, [0, 1],
+                    { pcaDataGraph: true, projected: true, xAxisLabel: "PC 1", yAxisLabel: "PC 2", title: "Data Projected onto top 2 PCs" });
+            }
+
+            // set up graphs for MDS viz
+            function generateMDSGraphs() {
+                drawDataGraph(mdsAttributes.getGraph(), mdsData.attributes, [0, 1],
+                    { xAxisLabel: "Dim 1", yAxisLabel: "Dim 2", title: "MDS", mdsatts: true });
+            }
+
+            function pointRatioToReliablity(r) {
+                if (r > .25)
+                    return "reliable";
+                if (r > .01)
+                    return "okay";
+                return "unreliable";
+            }
+
+            function drawCorrelationTable(tableObj, maxRows) {
+                var corrTableContent = "<tr><td></td><td>Attribute 1</td><td>Attribute 2</td><td>Correlation</td><td>Existing Data Points</td></tr>";
+                var correlations = [];
+                for (var a1 in pcaData.corrmat) {
+                    for (var a2 in pcaData.corrmat[a1]) {
+                        correlations.push({a1: a1, a2: a2, val: pcaData.corrmat[a1][a2]});
+                    }
+                }
+                correlations.sort(function(a, b) { return Math.abs(b.val) - Math.abs(a.val); });
+
+                maxRows = maxRows || correlations.length;
+                var rowsSeen = 0;
+                var showHigh = $("#showHighRel").prop("checked"),
+                    showMid = $("#showMidRel").prop("checked"),
+                    showLow = $("#showLowRel").prop("checked");
+                correlations.forEach(function(c, i) {
+                    var numPoints = pcaData.covNumPointsUsed[c.a1][c.a2];
+                    var a1Ed = contains(educationVariables, c.a1);
+                    var a2Ed = contains(educationVariables, c.a2);
+                    var totalPoints = dataPointsForPCA.length;
+                    var reliability = pointRatioToReliablity(numPoints / totalPoints);
+
+                    // skip every other entry to avoid repetitions and skip same attributes
+                    // and filter to just education variables
+                    if (i % 2 == 1 || c.a1 == c.a2
+                        || (!a1Ed && !a2Ed)
+                        || numPoints == 0
+                        || c.val == 0
+                        || rowsSeen >= maxRows
+                        || (!showHigh && reliability == "reliable")
+                        || (!showMid && reliability == "okay")
+                        || (!showLow && reliability == "unreliable"))
+                        return;
+                    rowsSeen++;
+
+                    // put education variable first
+                    if (!a1Ed) {
+                        var temp = a1;
+                        a1 = a2;
+                        a2 = temp;
+                    }
+                    
+                    corrTableContent += "<tr><td><a href='#' onclick='renderGraph(\"" + c.a1 + "\",\"" + c.a2 + "\")'>Viz</a></td>"
+                        + "<td>" + c.a1 + "</td><td>" + c.a2 + "</td><td>" + c.val + "</td>"
+                        + "<td class='" + reliability + "'>" + numPoints + "/" + totalPoints + "</td>"
+                        + "</tr>";
+                });
+
+                tableObj.getTable().html(corrTableContent);
+            }
+
+            function renderGraph(a1, a2) {
+                showPage(".sampling-viz");
+                $("#xAxisSelector").val(a1);
+                $("#yAxisSelector").val(a2);
+                renderSamplingGraphs();
+            }
+
+            // draw stratified sample graph
+            function renderSamplingGraphs() {
+                var xAtt = $("#xAxisSelector").val(), yAtt = $("#yAxisSelector").val();
+                drawDataGraph(stratSampleGraph.getGraph(), filterData(sampledData.stratified.datapoints), [xAtt, yAtt], {sampleGraph: true, kmeans: true});
+            }
+
+            // get sampled data from the server
+            function getSampledData() {
+                // gather parameters
+                var dataset = $("#datasetSelector").val();
+                var pointsToKeep = parseInt($("#pointsToKeep").val());
+                var maximumK = parseInt($("#maximumK").val());
+                if (maximumK < 2) {
+                    alert("K must be > 1!");
+                    return;
+                }
+                var elbowAngleRatio = parseFloat($("#elbowAngleRatio").val());
+                if (elbowAngleRatio >= 1 || elbowAngleRatio <= 0) {
+                    alert("Elbow angle ratio must be between 0 and 1!");
+                    return;
+                }
+
+                stratSampleGraph.setLoading();
+                setMessage("Sampling data...");
+                $("#runPCAButton").hide();
+                $("#runMDSButton").hide();
+
+                // make call to server
+                $.ajax({
+                    type: "POST",
+                    url: "getData",
+                    contentType: 'application/json;charset=UTF-8',
+                    data: JSON.stringify({dataset: dataset, pointsToKeep: pointsToKeep, maximumK: maximumK, elbowAngleRatio: elbowAngleRatio}),
+                    success: function(result) {
+                        result = JSON.parse(result);
+                        sampledData = result;
+                        console.log(sampledData);
+
+                        // set axis selectors
+                        $("#xAxisSelector").html("");
+                        $("#yAxisSelector").html("");
+                        result.attributes.forEach(function(a) {
+                            $("<option value='"+a+"'>"+a+"</option>").appendTo("#xAxisSelector");
+                            $("<option value='"+a+"'>"+a+"</option>").appendTo("#yAxisSelector");
+                        });
+                        $("#yAxisSelector").val(result.attributes[1]);
+
+                        // set cluster filters
+                        $("#clusterFilter").html("<option value='" + ALL + "'>All Clusters</option>");
+                        for (var k = 0; k < result.stratified.kmeans.length; k++)
+                            $("<option value='" + k + "'>Cluster " + (k + 1) + "</option>").appendTo("#clusterFilter");
+
+                        // get years
+                        var minYear = d3.min(sampledData.stratified.datapoints, function(d) { return d[YEAR]; });
+                        var maxYear = d3.max(sampledData.stratified.datapoints, function(d) { return d[YEAR]; });
+                        $("#minYearSelect").html("");
+                        $("#maxYearSelect").html("");
+                        for (var i = minYear; i <= maxYear; i++) {
+                            $("<option value='"+i+"'>"+i+"</option>").appendTo("#minYearSelect");
+                            $("<option value='"+i+"'>"+i+"</option>").appendTo("#maxYearSelect");
+                        }
+                        $("#maxYearSelect").val(maxYear);
+
+                        // show sampling results
+                        renderSamplingGraphs();
+
+                        getPCAData();
+                        getMDSData();
+                    }
+                });
+            }
+
+            // get PCA data from the server
+            function getPCAData(data, atts) {
+                var minYear = $("#minYearSelect").val();
+                var maxYear = $("#maxYearSelect").val();
+                if (minYear > maxYear) {
+                    alert("Min year must be less than max year!");
+                    return;
+                }
+
+                // use kept items from sample
+                dataPointsForPCA = filterData(
+                    sampledData.stratified.datapoints.filter(function(d) { return d.kept; })
+                );
+                var dataSample = data || dataPointsForPCA;
+                var attributes = atts || sampledData.attributes;
+
+                correlationsTable.setLoading();
+                biplot.setLoading();
+                setMessage("Getting correlations...");
+                $("#runPCAButton").hide();
+
+                // make call to server
+                $.ajax({
+                    type: "POST",
+                    url: "getPCAData",
+                    contentType: 'application/json;charset=UTF-8',
+                    data: JSON.stringify({ data: dataSample, attributes: attributes }),
+                    success: function(result) {
+                        result = JSON.parse(result);
+                        pcaData = result;
+                        console.log(result);
+
+                        // render PCA viz
+                        generatePCADataGraphs();
+                        drawCorrelationTable(correlationsTable);
+                        setMessage("");
+                        $("#runPCAButton").show();
+                        updateOverview();
+                    }
+                });
+            }
+
+            // get MDS data from the server
+            function getMDSData(data, atts) {
+                var minYear = $("#minYearSelect").val();
+                var maxYear = $("#maxYearSelect").val();
+                if (minYear > maxYear) {
+                    alert("Min year must be less than max year!");
+                    return;
+                }
+
+                // use kept items from sample
+                dataPointsForMDS = filterData(
+                    sampledData.stratified.datapoints.filter(function(d) { return d.kept; })
+                );
+                var dataSample = data || dataPointsForMDS;
+                var attributes = atts || sampledData.attributes;
+
+                mdsAttributes.setLoading();
+                setMessage("Running MDS...");
+                $("#runMDSButton").hide();
+
+                // make call to server
+                $.ajax({
+                    type: "POST",
+                    url: "getMDSData",
+                    contentType: 'application/json;charset=UTF-8',
+                    data: JSON.stringify({ data: dataSample, attributes: attributes }),
+                    success: function(result) {
+                        result = JSON.parse(result);
+                        mdsData = result;
+                        console.log(result);
+
+                        // render MDS viz
+                        generateMDSGraphs();
+                        setMessage("");
+                        $("#runMDSButton").show();
+                    }
+                });
+            }
+
+            // initial calls after everything is loaded
+            $(function() {
+                // initialize svg
+                svg = d3.select("#viz-container")
+                    .append("svg")
+                    .attr("xmlns", "http://www.w3.org/2000/svg")
+                    .attr("width", width + 2 * paddingWide)
+                    .attr("height", height + 2 * paddingHigh);
+
+                // add a section to svg for each page
+                svg.append("g").attr("class", "main-viz viz");
+                svg.append("g").attr("class", "sampling-viz viz");
+
+                // initialize graphs
+                biplot = new D3Graph('.main-viz', paddingWide, paddingHigh);
+                mdsAttributes = new D3Graph('.main-viz', paddingWide + dataGraphSize + 100, paddingHigh);
+                stratSampleGraph = new D3Graph('.sampling-viz', paddingWide, paddingHigh);
+                correlationsTable = new HTMLTable("correlationsTable", "main-viz", "#viz-container");
+                correlationsPartialTable = new HTMLTable("correlationsPartialTable", "main-viz", "#overview");
+
+                // set up click listeners
+                $("#sampleDataButton").on("click", getSampledData);
+                $("#drawSamplingGraphsButton").on("click", renderSamplingGraphs);
+                $("#runPCAButton").on("click", function() { getPCAData(); });
+                $("#runMDSButton").on("click", function() { getMDSData(); });
+
+                // start on main page
+                showPage('.main-viz');
+
+                // start sampling
+                getSampledData();
+            });
+
+            function updateOverview() {
+                $("#overview").show();
+                var titleText = "";
+                var region = regionFilter();
+                var cluster = clusterFilter();
+                var incomeGroup = incomeGroupFilter();
+                if (cluster == ALL)
+                    titleText += "All Countries"
+                else
+                    titleText += "Cluster " + (parseInt(cluster) + 1);
+
+                if (region != ALL)
+                    titleText += " in " + region;
+
+                if (incomeGroup != ALL)
+                    titleText += " with " + incomeGroup;
+                
+                var lowYear = d3.min(pcaData.scored_data, function(d) { return d[YEAR]; });
+                var highYear = d3.max(pcaData.scored_data, function(d) { return d[YEAR]; });
+                titleText += ", " + lowYear + "-" + highYear;
+
+                $("#overview-title").html(titleText);
+
+                drawCorrelationTable(correlationsPartialTable, 5);
+            }
+
+            function setMessage(msg) {
+                $("#viewbox").html(msg);
+            }
+
+            // go to a specific page of the app
+            function showPage(selector) {
+                $(".viz").hide();
+                $(".input-row").hide();
+                $(selector).show();
+
+                svg.attr("width", width + 2 * paddingWide);
+            }
+
+            // return if arr contains item
+            function contains(arr, item) {
+                for (var i = 0; i < arr.length; i++) {
+                    if (arr[i] == item)
+                        return true;
+                }
+                return false;
+            }            
+        </script>
+    </head>
+    <body>
+        <h1>The Effects of Education on National Well-Being</h1>
+        <div>
+            <div class="tab">
+                <a href="#" onclick="showPage('.main-viz')">Main Viz</a>
+            </div>
+            <div class="tab">
+                <a href="#" onclick="showPage('.sampling-viz')">Data Sampling</a>
+            </div>
+        </div>
+
+        <div>
+            <div class="input-row main-viz">
+                <label>Cluster Filter:</label>
+                <select id="clusterFilter"></select>
+                <label>Region Filter:</label>
+                <select id="regionFilter">
+                    <option value="all">All Regions</option>
+                    <option value="South Asia">South Asia</option>
+                    <option value="Europe & Central Asia">Europe & Central Asia</option>
+                    <option value="Middle East & North Africa">Middle East & North Africa</option>
+                    <option value="East Asia & Pacific">East Asia & Pacific</option>
+                    <option value="Sub-Saharan Africa">Sub-Saharan Africa</option>
+                    <option value="Latin America & Caribbean">Latin America & Caribbean</option>
+                    <option value="North America">North America</option>
+                </select>
+                <label>Income Group Filter:</label>
+                <select id="incomeGroupFilter">
+                    <option value="all">All Income Groups</option>
+                    <option value="Low income">Low income</option>
+                    <option value="Lower middle income">Lower middle income</option>
+                    <option value="Upper middle income">Upper middle income</option>
+                    <option value="High income">High income</option>
+                </select>
+                <label>Min Year:</label>
+                <select id="minYearSelect"></select>
+                <label>Max Year:</label>
+                <select id="maxYearSelect"></select>
+            </div>
+
+            <div class="input-row main-viz">
+                <label>Correlation Reliability:</label>
+                <label>Show High</label>
+                <input type="checkbox" id="showHighRel" checked="checked" />
+                <label>Show Mid</label>
+                <input type="checkbox" id="showMidRel" />
+                <label>Show Low</label>
+                <input type="checkbox" id="showLowRel" />
+            </div>
+
+            <div class="input-row main-viz">
+                <button value="Get Correlations" id="runPCAButton">Run PCA</button>
+                <button value="Get MDS" id="runMDSButton">Run MDS</button>
+            </div>
+
+            <div class="input-row sampling-viz">
+                <label>Points to keep:</label>
+                <input type="text" value="0" id="pointsToKeep" />
+                <label>Maximum Clusters:</label>
+                <input type="text" value="2" id="maximumK" />
+                <label>Elbow angle ratio:</label>
+                <input type="text" value="0.15" id="elbowAngleRatio" />
+                <button value="Sample data" id="sampleDataButton">Retrieve and sample data</button>
+            </div>
+
+            <div class="input-row sampling-viz">
+                <label>x-Axis Variable:</label>
+                <select id="xAxisSelector"></select>
+                <label>y-Axis Variable:</label>
+                <select id="yAxisSelector"></select>
+                <button value="Redraw Graphs" id="drawSamplingGraphsButton">Redraw Graphs</button>
+            </div>
+        </div>
+        <div id="overview" class="main-viz viz" style="display: none;">
+            <h3 id="overview-title"></h3>
+            <h4>Top 5 Correlations:</h4>
+        </div>
+        <div id="viewbox" style="position: relative; width: 200px; height: 50px;"></div>
+        <div id="viz-container"></div>
+    </body>
+</html>

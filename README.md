@@ -1,9 +1,9 @@
 # Investigating Relationships Between Variables of Education and Affluence
-In this project, I took World Bank data, crunched some numbers on it, and visualized it to investigate how educational variables
+In this project, I took World Bank data, ran some statistical analysis on it, and visualized it to investigate how educational variables
 are related to national well-being. This was the final project I devloped for my visualization class.
 You can read about the details in the report, watch the demo video, or try the software yourself!
 
-To run the app, simply run `python app.py`. It's built on Flask, and I apologize for the lack of a pip requirements file.
+To run the app, simply run `python app.py` in the `app` folder. It's built on Flask, and I apologize for the lack of a pip requirements file.
 
 ## Some fair notices
 - You'll notice some correlations are > 1. This is clearly wrong, so keep in mind the calculations are flawed.
